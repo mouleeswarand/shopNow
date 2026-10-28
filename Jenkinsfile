@@ -115,7 +115,8 @@ pipeline {
                     echo "Frontend and admin API checks passed."
                 '''
             }
-        }
+       	  }
+	}
 
 	post {
            failure {
@@ -132,6 +133,6 @@ pipeline {
                 to: '$DEFAULT_RECIPIENTS'
             )
          }
-      }
-    }
+      
+     }
 }
