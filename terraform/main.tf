@@ -54,6 +54,11 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.shopnow.id
   }
 
+  route {
+    cidr_block                = "172.31.1.114/32"
+    vpc_peering_connection_id = aws_vpc_peering_connection.jenkins_monitoring.id
+  }
+
   tags = {
     Name = "shopnow-dev-public-rt"
   }
