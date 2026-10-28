@@ -11,6 +11,42 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Prometheus application and Node.js process metrics.
+const promClient = require('prom-client');
+
+promClient.collectDefaultMetrics();
+
+const apiRequests = new promClient.Counter({
+  name: 'shopnow_api_requests_total',
+  help: 'Total completed ShopNow API requests',
+  labelNames: ['method', 'status_code']
+});
+
+// Count API requests after the response has finished.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    res.on('finish', () => {
+      apiRequests.inc({
+        method: req.method,
+        status_code: String(res.statusCode)
+      });
+    });
+  }
+
+  next();
+});
+
+// Prometheus scrapes this endpoint from inside the cluster.
+app.get('/metrics', async (req, res) => {
+  try {
+    res.set('Content-Type', promClient.register.contentType);
+    res.end(await promClient.register.metrics());
+  } catch (error) {
+    console.error('Unable to collect metrics:', error.message);
+    res.status(500).send('Unable to collect metrics');
+  }
+});
+
 // Middleware - CORS configuration AFTER app is created
 app.use(cors({
   origin: ['http://localhost:3000', 'http://localhost:3001'],

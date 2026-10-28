@@ -47,10 +47,13 @@ kind: Service
 metadata:
   name: backend-service
   namespace: shopnow
+  labels:
+    app: backend
 spec:
   type: ClusterIP
   selector:
     app: backend
   ports:
-    - port: 5000
+    - name: http
+      port: 5000
       targetPort: 5000
