@@ -423,6 +423,191 @@ If an apply fails, inspect the error and generate a fresh plan. Terraform may ha
 - After Sprint 6, review and destroy Terraform-managed resources using a reviewed plan. Retain the S3 state bucket until the destroy is complete and AWS resources are verified removed. Jenkins, the state bucket and Sprint 1 resources were created separately and need separate cleanup.
 
 
+# Sprint 3 — Configuration Management with Ansible and Jenkins
+
+## Project overview
+
+This sprint adds Ansible configuration management to the [ShopNow DevOps project](https://github.com/mouleeswarand/shopNow). Jenkins runs Ansible against a dedicated Terraform-managed Ubuntu EC2 instance through AWS Systems Manager (SSM). A successful Terraform apply then triggers the Ansible job.
+
+**Region:** `ap-south-1` (Mumbai)  
+**Environment:** `dev`  
+**Target:** `shopnow-dev-ansible-target`  
+**Status:** The target was configured and the Terraform-to-Ansible workflow completed successfully.
+
+## Sprint 3 results
+
+| Goal | Verified result |
+| --- | --- |
+| Install Ansible on Jenkins | Ansible Core 2.20.1 and the `amazon.aws` collection were available to the Jenkins user |
+| Provision a target with Terraform | Ubuntu EC2 instance created with an SSM role, instance profile and security group |
+| Connect through Systems Manager | Target reported **Online**; Ansible connectivity test succeeded |
+| Configure the target | Playbook installed Docker, `kubectl`, curl and CA certificates; Docker service was enabled and started |
+| Test repeatability | Second configuration run reported `changed=0`, `unreachable=0`, `failed=0` |
+| Integrate with Jenkins | Terraform apply pipeline triggered `shopnow-ansible #6`; both jobs finished **SUCCESS** |
+
+This sprint configures a separate EC2 instance. EKS-managed worker nodes were not configured with Ansible; EKS can replace those nodes, making manual node changes unsuitable as a lasting configuration method.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    GitHub["GitHub repository"] --> Jenkins["Jenkins EC2: Ansible controller"]
+    Jenkins -->|"Reviewed apply"| Terraform["Terraform-managed resources"]
+    Jenkins -->|"SSM session"| Target["Ubuntu EC2: Ansible target"]
+    Jenkins -->|"Temporary module files"| S3["S3 transfer bucket"]
+    S3 -->|"Presigned transfers"| Target
+    Terraform --> Target
+```
+
+The Jenkins server acts as the **control node**, meaning it runs the Ansible playbooks. The target is the EC2 server that receives the configuration. The connection uses Systems Manager; the target security group has no inbound SSH rule. The S3 bucket is used for temporary Ansible transfers and is separate from the Terraform state bucket.
+
+## Components and files
+
+| Component or file | Purpose |
+| --- | --- |
+| `terraform/ansible-target.tf` | Defines the target instance, role, instance profile, security group and output |
+| `ansible/inventory.ini` | Defines the target instance and SSM connection settings |
+| `ansible/connectivity.yml` | Checks Ansible connectivity using the ping module |
+| `ansible/configure-server.yml` | Installs Docker, kubectl and supporting packages |
+| `Jenkinsfile.ansible` | Runs syntax, connectivity and configuration stages |
+| `Jenkinsfile.terraform-apply` | Plans, pauses for review, applies and triggers Ansible after success |
+| S3 transfer bucket | Holds temporary files used by the SSM connection plugin |
+
+The inventory and Jenkins SSM permission currently reference a fixed EC2 instance ID. If Terraform replaces that instance, both must be updated before Ansible can connect. Dynamic discovery has not yet been implemented.
+
+## Implementation
+
+### 1. Prepare the Jenkins control node
+
+Ansible was installed on the existing Jenkins Ubuntu server. The Jenkins operating-system user was verified to have access to:
+
+- Ansible Core `2.20.1` and `ansible-playbook`.
+- The `amazon.aws` collection, version `10.1.2` at the time of the test.
+- AWS Python libraries `boto3` and `botocore`.
+- The AWS Session Manager plugin and AWS CLI.
+
+The EC2 instance role provides AWS credentials; no access keys were entered into the Jenkins job. Jenkins already has powerful Docker and infrastructure permissions in this lab, so access to the controller, jobs and repository must be limited to trusted users.
+
+### 2. Provision the target
+
+Terraform described five additions: an EC2 IAM role, its SSM policy attachment, an instance profile, a security group and an EC2 instance. The plan showed `5 to add, 0 to change, 0 to destroy`, and Jenkins applied the reviewed plan successfully.
+
+The target uses Ubuntu Server 24.04 LTS, a `t3.small` instance, a 20 GiB encrypted gp3 root volume, IMDSv2 and a public subnet. It has no inbound security-group rules; outbound access is used for Systems Manager and package downloads. A fixed, verified AMI ID was used to avoid an unreviewed replacement when a new image is released.
+
+The instance was reported as **running** by EC2 and **Online** by Systems Manager. The target IAM role uses `AmazonSSMManagedInstanceCore` to register with Systems Manager.
+
+### 3. Configure SSM file transfers
+
+The Ansible SSM connection plugin needs the controller and target to reach S3. The transfer bucket is separate from Terraform state, has all public-access blocks enabled, uses SSE-S3 encryption and has versioning disabled. The Jenkins role received bucket read/write/delete permissions and permission to start a session on the specific target.
+
+Ansible normally deletes transfer files after a playbook run, but an interrupted run may leave files behind. Restrict access to the bucket and avoid sending secrets through tasks that could leave them in temporary files. Bucket access verification confirmed its location; the successful Ansible run verified connectivity and transfers together.
+
+### 4. Test connectivity
+
+The Jenkins pipeline ran `ansible/connectivity.yml`. Its ping task checks that Ansible can connect and run a Python module on the target; it is not an ICMP network ping.
+
+Observed recap:
+
+```text
+ok=1  changed=0  unreachable=0  failed=0
+Finished: SUCCESS
+```
+
+### 5. Configure the server
+
+The configuration playbook uses elevated privileges to:
+
+1. Install Ubuntu's `docker.io`, `curl` and `ca-certificates` packages.
+2. Start Docker and enable it at boot.
+3. Download `kubectl` v1.37.0 with SHA-256 checksum verification.
+4. Display Docker and kubectl client versions.
+
+Installing kubectl does not grant the target access to the EKS cluster. EKS access for this target has not been configured or tested.
+
+The first configuration run succeeded with `ok=7`, `changed=2` and `failed=0`. The second run succeeded with `ok=7`, `changed=0` and `failed=0`, demonstrating repeatability for the tested target and unchanged inputs.
+
+### 6. Chain Jenkins jobs
+
+The apply pipeline generates a Terraform plan, pauses for review, applies the saved plan and, only after a successful apply, starts `shopnow-ansible`. It waits for the downstream job and propagates a downstream failure to the upstream result. The `tfplan` file is removed in the pipeline's post-build step.
+
+The connected workflow was tested successfully: `shopnow-ansible #6` completed with **SUCCESS**, followed by the Terraform apply job finishing **SUCCESS**. The apply job uses a manual review step; it is not an automatic approval of infrastructure changes.
+
+## Verification commands
+
+These commands are for inspection. Use the appropriate AWS identity and avoid exposing credentials or Terraform state.
+
+### Check the target in EC2 and Systems Manager
+
+Replace the example instance ID if Terraform replaces the target:
+
+```bash
+aws ec2 describe-instances \
+  --region ap-south-1 \
+  --instance-ids i-0a1bba312966f8413 \
+  --query 'Reservations[0].Instances[0].{ID:InstanceId,State:State.Name}' \
+  --output table
+```
+
+```bash
+aws ssm describe-instance-information \
+  --region ap-south-1 \
+  --filters 'Key=InstanceIds,Values=i-0a1bba312966f8413' \
+  --query 'InstanceInformationList[*].{ID:InstanceId,PingStatus:PingStatus,Platform:PlatformName}' \
+  --output table
+```
+
+### Check Ansible on Jenkins EC2
+
+```bash
+sudo -u jenkins ansible-playbook --version
+sudo -u jenkins ansible-galaxy collection list amazon.aws
+sudo -u jenkins session-manager-plugin
+```
+
+### Verify the playbook through Jenkins
+
+Run `shopnow-ansible` and inspect the **Console Output**. A successful repeat run should show `unreachable=0` and `failed=0`; `changed=0` is expected when the target already matches the playbook. A legitimate package or configuration change can produce a nonzero changed count.
+
+## Screenshot mapping
+
+Create `screenshots/sprint-3/` in the repository and save screenshots using the names below. The image references will display once the files are added to GitHub. These are placeholders: use your own screenshots and redact credentials, tokens, session codes and other sensitive information.
+
+| No. | Screenshot | Evidence |
+| --- | --- | --- | --- |
+| 1 | Ansible and collection versions | Ansible runs as the Jenkins user |
+<img width="813" height="310" alt="image" src="https://github.com/user-attachments/assets/896c181e-1b2d-49a7-a29b-a5fb6ddd6c24" />
+
+
+| 2 | Terraform target plan | Five additions and no changes or deletions |
+| 3 | Terraform apply | Target resources created successfully |
+<img width="1042" height="325" alt="image" src="https://github.com/user-attachments/assets/f181c9b6-a517-4201-bcea-3de88ba5e293" />
+
+| 4 | Systems Manager managed nodes | Target is Online |
+<img width="600" height="59" alt="image" src="https://github.com/user-attachments/assets/8177841c-6267-4a27-b66a-f9f79647bc66" />
+
+
+| 5 | Transfer bucket security | Encryption and public-access block |
+<img width="654" height="548" alt="image" src="https://github.com/user-attachments/assets/c87a48b8-e5d1-49bb-92e4-baf6e86c7017" />
+
+| 6 | Ansible connectivity | Connectivity recap with no failures |
+| 7 | First configuration run | Configuration succeeded with changes |
+| 8 | Second configuration run | `changed=0` and `failed=0` |
+<img width="1172" height="822" alt="image" src="https://github.com/user-attachments/assets/4ef0fee5-6d32-48ab-9fd5-da92a0fcdfa8" />
+
+| 9 | Terraform-to-Ansible flow | Downstream Ansible job and upstream job both succeeded |
+<img width="923" height="780" alt="image" src="https://github.com/user-attachments/assets/f45647a7-851b-4ce2-98f0-05d93e4173e3" />
+
+
+## Troubleshooting
+
+| Issue | What to check |
+| --- | --- |
+| `ansible: not found` | Install Ansible on the Jenkins EC2 server, then verify it as the `jenkins` user. |
+| `session-manager-plugin: not found` | Install the AWS Session Manager plugin on Jenkins EC2; the WSL installation is separate. |
+| `sudo: unknown user jenkins` | Confirm the command is running on the Jenkins EC2 server, not in WSL. |
+| Target missing or Offline in Systems Manager | Check EC2 state, the target instance profile, SSM Agent and outbound network access. |
+| Ansible SSM `AccessDenied` | Check the Jenkins role, target instance ID and S3 transfer-bucket permissions. The inventory and policy use a fixed ID. |
+| Ansible run leaves temporary S3 files | Inspect the transfer bucket after interrupted jobs and remove leftovers according to the lab's retention needs. |
 
 
 
