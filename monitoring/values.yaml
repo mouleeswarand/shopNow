@@ -44,3 +44,6 @@ prometheus:
 alertmanager:
   service:
     type: ClusterIP
+
+  alertmanagerSpec:
+    configSecret: shopnow-alertmanager-email

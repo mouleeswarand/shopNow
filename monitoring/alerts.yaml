@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shopnow-alerts
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: shopnow.rules
+      rules:
+        - alert: ShopNowBackendMetricsUnavailable
+          expr: |
+            absent(up{service="backend-service", namespace="shopnow"})
+            or
+            up{service="backend-service", namespace="shopnow"} == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ShopNow backend metrics are unavailable"
+            description: "Prometheus cannot discover or scrape the ShopNow backend metrics target for 2 minutes."
+
+        - alert: JenkinsMetricsUnavailable
+          expr: |
+            absent(up{service="jenkins-metrics", namespace="monitoring"})
+            or
+            up{service="jenkins-metrics", namespace="monitoring"} == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Jenkins metrics are unavailable"
+            description: "Prometheus cannot discover or scrape the Jenkins metrics target for 2 minutes."
+
+        - alert: ShopNowBackendUnavailable
+          expr: |
+            sum(kube_deployment_status_replicas_available{
+              namespace="shopnow",
+              deployment="backend"
+            }) < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ShopNow backend has no available replicas"
+            description: "The backend Deployment has had no available replicas for 2 minutes."
