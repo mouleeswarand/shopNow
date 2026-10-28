@@ -1,0 +1,43 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+    }
+
+    stages {
+        stage('Verify tools and identity') {
+            steps {
+                sh '''
+                    ansible-playbook --version
+                    aws sts get-caller-identity --region "$AWS_REGION"
+                '''
+            }
+        }
+
+        stage('Check playbook syntax') {
+            steps {
+                sh '''
+                    ansible-playbook \
+                      -i ansible/inventory.ini \
+                      ansible/connectivity.yml \
+                      --syntax-check
+                '''
+            }
+        }
+
+        stage('Test target connection') {
+            steps {
+                sh '''
+                    ansible-playbook \
+                      -i ansible/inventory.ini \
+                      ansible/connectivity.yml
+                '''
+            }
+        }
+    }
+}

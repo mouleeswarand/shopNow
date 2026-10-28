@@ -1,0 +1,8 @@
+---
+- name: Check connection to the ShopNow Ansible target
+  hosts: shopnow_targets
+  gather_facts: false
+
+  tasks:
+    - name: Verify Ansible can run a module on the target
+      ansible.builtin.ping:
