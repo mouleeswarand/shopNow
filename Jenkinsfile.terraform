@@ -1,0 +1,49 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+    }
+
+    stages {
+        stage('Verify tools and identity') {
+            steps {
+                sh '''
+                    terraform version
+                    aws sts get-caller-identity --region "$AWS_REGION"
+                '''
+            }
+        }
+
+        stage('Initialize Terraform') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform init -input=false'
+                }
+            }
+        }
+
+        stage('Check configuration') {
+            steps {
+                dir('terraform') {
+                    sh '''
+                        terraform fmt -check
+                        terraform validate
+                    '''
+                }
+            }
+        }
+
+        stage('Plan infrastructure') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform plan -input=false -lock-timeout=5m'
+                }
+            }
+        }
+    }
+}
