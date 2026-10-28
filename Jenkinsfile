@@ -116,5 +116,22 @@ pipeline {
                 '''
             }
         }
+
+	post {
+           failure {
+            emailext(
+                subject: "FAILED: ShopNow deployment - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """The ShopNow pipeline failed.
+
+		Job: ${env.JOB_NAME}
+		Build number: ${env.BUILD_NUMBER}
+		Build URL: ${env.BUILD_URL}
+
+		Open the Jenkins console output to find the failed stage and error.
+		""",
+                to: '$DEFAULT_RECIPIENTS'
+            )
+         }
+      }
     }
 }
