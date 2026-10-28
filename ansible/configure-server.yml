@@ -1,0 +1,49 @@
+---
+- name: Configure the ShopNow Ansible target
+  hosts: shopnow_targets
+  become: true
+
+  vars:
+    kubectl_version: "v1.37.0"
+
+  tasks:
+    - name: Install Docker and supporting packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure Docker is running and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Install kubectl with checksum verification
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        owner: root
+        group: root
+        mode: "0755"
+        checksum: "sha256:https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl.sha256"
+
+    - name: Check Docker version
+      ansible.builtin.command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Check kubectl version
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_version_output
+      changed_when: false
+
+    - name: Display installed versions
+      ansible.builtin.debug:
+        msg:
+          - "{{ docker_version.stdout }}"
+          - "{{ kubectl_version_output.stdout_lines }}"

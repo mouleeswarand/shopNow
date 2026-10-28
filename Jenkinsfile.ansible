@@ -24,7 +24,7 @@ pipeline {
                 sh '''
                     ansible-playbook \
                       -i ansible/inventory.ini \
-                      ansible/connectivity.yml \
+                      ansible/configure-server.yml \
                       --syntax-check
                 '''
             }
@@ -36,6 +36,16 @@ pipeline {
                     ansible-playbook \
                       -i ansible/inventory.ini \
                       ansible/connectivity.yml
+                '''
+            }
+        }
+
+        stage('Configure target') {
+            steps {
+                sh '''
+                    ansible-playbook \
+                      -i ansible/inventory.ini \
+                      ansible/configure-server.yml
                 '''
             }
         }
