@@ -844,6 +844,209 @@ Create `screenshots/sprint-4/` in your repository. Save screenshots with the exa
 | Jenkins fails after a partial deployment | Review rollout status, current image tags and events. A failed pipeline does not automatically roll back already applied resources.
 
 
+# Sprint 5: Monitoring and Alerts for ShopNow
+
+## Goal
+
+Monitor the ShopNow application, Kubernetes infrastructure, and Jenkins pipeline using Prometheus and Grafana. Send email when important services become unavailable or a Jenkins build fails.
+
+**Project:** [ShopNow](https://github.com/mouleeswarand/shopNow)  
+**AWS Region:** `ap-south-1`  
+**EKS cluster:** `shopnow-dev`  
+**Application namespace:** `shopnow`  
+**Monitoring namespace:** `monitoring`
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[ShopNow backend metrics] --> P[Prometheus]
+    N[Node and Kubernetes metrics] --> P
+    J[Jenkins metrics via private proxy] --> P
+    P --> G[Grafana dashboards]
+    P --> R[Prometheus alert rules]
+    R --> AM[Alertmanager]
+    AM --> E[SMTP email]
+    CI[Jenkins application pipeline] -->|Build failure| E
+```
+
+Prometheus collects measurements at regular intervals. Grafana turns those measurements into graphs. Prometheus alert rules detect problems and pass them to Alertmanager, which sends email. Jenkins sends its own failure notification through its email plugin.
+
+Jenkins is in a separate VPC. The EKS and Jenkins VPCs are connected through VPC peering, and a private proxy exposes the Jenkins metrics endpoint to Prometheus. This is a lab setup; protect and review access before using it for production.
+
+## Components
+
+| Component | Purpose | Where it runs |
+| --- | --- | --- |
+| Prometheus | Collects and stores metrics; evaluates alert rules | EKS, `monitoring` namespace |
+| Grafana | Displays metrics in dashboards | EKS, `monitoring` namespace |
+| Alertmanager | Routes alerts to email | EKS, `monitoring` namespace |
+| Node exporter | Exposes worker-node metrics | EKS worker nodes |
+| kube-state-metrics | Reports Kubernetes object health and state | EKS |
+| Backend metrics | Exposes API request and process metrics at `/metrics` | ShopNow backend |
+| Jenkins Prometheus plugin | Exposes Jenkins job and executor metrics | Jenkins EC2 |
+| Jenkins Email Extension | Sends a message when the application pipeline fails | Jenkins EC2 |
+
+## What was completed
+
+1. Installed the `kube-prometheus-stack` Helm chart, version `92.14.1`, into the `monitoring` namespace.
+2. Used the `shopnow-gp3` EBS storage class for Prometheus and Grafana. Their persistent volume claims were reported as **Bound**.
+3. Added `prom-client` to the Node.js backend, enabled process metrics, and created the `shopnow_api_requests_total` counter.
+4. Configured a ServiceMonitor so Prometheus could scrape the backend. The API request metric was visible in Prometheus and Grafana.
+5. Installed the Jenkins Prometheus plugin and set up private connectivity from EKS to the Jenkins metrics proxy. Prometheus reported the target as up.
+6. Added rules for backend metrics, Jenkins metrics, and backend deployment availability.
+7. Configured Alertmanager email using an existing Kubernetes Secret. A temporary test alert fired and its email was received; the test rule was then removed.
+8. Tested Jenkins Email Extension with a separate job that failed intentionally. Its email was received.
+9. Added a failure notification to the ShopNow Jenkins pipeline. A subsequent normal deployment finished successfully.
+10. Confirmed the local Git working tree was clean and up to date with `origin/main`.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `monitoring/values.yaml` | Helm settings, including the Alertmanager configuration Secret reference |
+| `monitoring/alerts.yaml` | ShopNow and Jenkins monitoring alert rules |
+| `monitoring/backend-servicemonitor.yaml` | Prometheus discovery of backend metrics |
+| `monitoring/jenkins-servicemonitor.yaml` | Jenkins metrics service and monitoring configuration |
+| `backend/server.js` and `backend/package.json` | Backend instrumentation and Prometheus client dependency |
+| `Jenkinsfile` | Application build/deploy pipeline and failure email |
+
+The live Kubernetes Secret and Jenkins credentials are configured separately and are not stored in Git. A fresh environment requires those secrets and SMTP settings to be recreated. The monitoring Helm release, dashboards, and supporting configuration require the documented installation steps; a clean Git checkout alone does not recreate them automatically.
+
+## Verify the monitoring stack
+
+Run these commands from **WSL**, with `kubectl` configured for the EKS cluster:
+
+```bash
+cd ~/shopNow
+kubectl get nodes
+helm list -n monitoring
+kubectl get pods -n monitoring
+kubectl get pvc -n monitoring
+```
+
+Check that the required pods are running and the Prometheus and Grafana claims are `Bound`. A new installation can take a few minutes to settle.
+
+```bash
+kubectl get servicemonitor -n monitoring
+kubectl get prometheusrule shopnow-alerts -n monitoring --show-labels
+kubectl top pods -n monitoring
+```
+
+The alert rule must match the Prometheus rule selector; in this environment it has the label `release=monitoring`.
+
+## Open the dashboards
+
+Run each port-forward in its own WSL terminal and keep it open. These commands bind to the local machine by default.
+
+```bash
+kubectl port-forward -n monitoring deployment/monitoring-grafana 3000:3000
+```
+
+Open `http://localhost:3000` and sign in using the Grafana credentials configured for this environment. Do not commit the password or include it in screenshots.
+
+```bash
+kubectl port-forward -n monitoring pod/prometheus-monitoring-kube-prometheus-prometheus-0 9091:9090
+```
+
+Open `http://localhost:9091`. In the Prometheus query page, try:
+
+```promql
+shopnow_api_requests_total
+```
+
+```promql
+sum(rate(shopnow_api_requests_total[5m]))
+```
+
+The request counter includes calls to API endpoints, including health checks. The rate may be empty until Prometheus has collected enough samples.
+
+To check Jenkins scraping:
+
+```promql
+up{job="jenkins-metrics"}
+```
+
+A value of `1` means the target was reachable at its latest scrape. Explore Jenkins metrics such as `default_jenkins_executors_busy` and `default_jenkins_executors_queue_length` in Prometheus or Grafana.
+
+## Alerts and email tests
+
+| Alert | Purpose |
+| --- | --- |
+| `ShopNowBackendMetricsUnavailable` | Reports missing or unavailable backend metrics |
+| `JenkinsMetricsUnavailable` | Reports missing or unavailable Jenkins metrics |
+| `ShopNowBackendUnavailable` | Reports insufficient available backend replicas |
+
+To see whether Prometheus loaded the rules, keep the Prometheus port-forward open and run:
+
+```bash
+curl -fsS http://localhost:9091/api/v1/rules | python3 -c 'import json,sys; d=json.load(sys.stdin); [(print(g["name"], ":", ", ".join(r["name"] for r in g["rules"]))) for g in d["data"]["groups"] if "shopnow" in g["name"].lower()]'
+```
+
+**Prometheus email test:** A temporary `ShopNowEmailTest` rule was seen firing and the test email arrived. The temporary rule was removed after the test. This validates the test route, not every individual production alert condition.
+
+**Jenkins email test:** The separate `shopnow-email-test` pipeline intentionally failed and sent an email. `Finished: FAILURE` was expected for that test. The application pipeline subsequently completed with `SUCCESS`; an actual failure of that pipeline was not deliberately induced.
+
+Alertmanager uses the configured SMTP server with authentication. Credentials belong in the Kubernetes Secret and Jenkins credentials, never in a committed README, manifest, pipeline, screenshot, or console output.
+
+## Screenshot map
+
+Create `docs/screenshots/sprint-5/` in the repository and save screenshots using the filenames below. Replace the placeholders with your own screenshots. Hide passwords, tokens, email addresses and other sensitive data before uploading.
+
+| No. | Screenshot | What to capture | 
+| --- | --- | --- | --- |
+| 1 | Monitoring pods | `kubectl get pods -n monitoring` showing running pods | 
+<img width="787" height="150" alt="image" src="https://github.com/user-attachments/assets/51ce1254-98d1-469b-9a4d-1fee799368f1" />
+
+
+| 2 | Persistent storage | `kubectl get pvc -n monitoring` showing Bound PVCs | 
+<img width="1648" height="110" alt="image" src="https://github.com/user-attachments/assets/193d6c17-342e-4e4e-9b18-f1aa4b52869d" />
+
+
+| 3 | Prometheus backend metric | Query `shopnow_api_requests_total` and its result | 
+<img width="1136" height="210" alt="image" src="https://github.com/user-attachments/assets/22c006ff-5ee8-46ec-a72b-ce6ffc91445c" />
+
+| 4 | Application dashboard | Grafana request-rate graph | 
+<img width="1638" height="819" alt="image" src="https://github.com/user-attachments/assets/d7c62f68-6a13-469f-b092-a7242919926a" />
+
+
+| 5 | Jenkins target | Prometheus query `up{job="jenkins-metrics"}` showing `1` | 
+<img width="644" height="262" alt="image" src="https://github.com/user-attachments/assets/ee482b03-6b32-4222-b8a9-d08eaab1ad0d" />
+
+
+| 6 | Jenkins dashboard | Grafana Jenkins metric panel | 
+<img width="975" height="500" alt="image" src="https://github.com/user-attachments/assets/a9d0fb11-97a9-4dba-b43f-232cf8352f32" />
+
+
+| 7 | Alert rules | Prometheus Alerts page showing ShopNow rules | 
+<img width="1656" height="150" alt="image" src="https://github.com/user-attachments/assets/85ef0038-e1f3-4e3a-9139-2ea136dc62ab" />
+
+
+| 8 | Test alert | Saved screenshot of `ShopNowEmailTest` firing, if available | 
+| 9 | Alert email | Received alert email, with personal details hidden | 
+<img width="945" height="676" alt="image" src="https://github.com/user-attachments/assets/5e854e01-cc37-4853-a511-075e657072ac" />
+
+
+| 10 | Jenkins test | `shopnow-email-test` console showing intentional failure and email step | 
+<img width="1001" height="709" alt="image" src="https://github.com/user-attachments/assets/80b1ade3-a95f-4b42-9423-774f3ed1db92" />
+
+
+| 11 | Jenkins email | Received Jenkins failure email, with personal details hidden | 
+<img width="462" height="485" alt="image" src="https://github.com/user-attachments/assets/45c38cd0-7808-40f3-96a6-2cc08b7c7b46" />
+
+
+| 12 | Deployment pipeline | Successful ShopNow pipeline with API checks | 
+<img width="1618" height="864" alt="image" src="https://github.com/user-attachments/assets/0f3b8e9b-07c3-4570-b1ed-a18fea2f290c" />
+
+## Troubleshooting
+
+- **No metrics:** Check the ServiceMonitor labels, selected Service and port, and Prometheus Targets page. Allow time for scraping.
+- **Jenkins target down:** Check the VPC peering status, both VPC routes, the Jenkins security group, proxy status and connectivity to port `9105`. The configured endpoint uses the Jenkins private IP; update the configuration if that IP changes.
+- **Rules missing:** Confirm `release=monitoring` and check the Prometheus rule selector and `/api/v1/rules`.
+- **No email:** Check Alertmanager or Jenkins logs, SMTP configuration and credentials, and the spam folder. TCP/TLS connectivity alone does not prove SMTP authentication or delivery.
+- **Pending PVC:** Inspect `kubectl describe pvc -n monitoring` and verify that the EBS CSI driver and storage class are functioning.
+- **Port already in use:** Select a different local port, for example `3001:3000` for Grafana.
+
 
 
 
