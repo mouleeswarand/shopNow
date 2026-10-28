@@ -202,6 +202,226 @@ Create a `screenshots/` folder in the repository. Save each image using the file
 | No Jenkins `Build Steps` option | The job was a Pipeline job, so stages were defined in a Jenkinsfile rather than a Freestyle build step. |
 
 
+# Sprint 2 — AWS Infrastructure with Terraform and Jenkins
+
+## Project overview
+
+This sprint provisions a development Kubernetes environment on AWS using Terraform, with Jenkins coordinating infrastructure plans and a reviewed apply. It builds on the Docker, ECR and Jenkins setup completed in Sprint 1.
+
+**Repository:** [mouleeswarand/shopNow](https://github.com/mouleeswarand/shopNow)  
+**AWS region:** `ap-south-1` (Mumbai)  
+**Environment:** `dev`  
+**Cluster:** `shopnow-dev`
+
+> **Scope:** One development environment has been provisioned and verified. Multiple environments, ShopNow application deployment on EKS, production hardening and monitoring are future work.
+
+## Sprint 2 results
+
+| Goal | Evidence |
+| --- | --- |
+| Prepare Terraform on WSL and Jenkins | Terraform 1.17.0 was verified on Jenkins; the WSL installation was prepared for the same version |
+| Store state remotely | An S3 backend was configured with encryption, bucket versioning, public-access blocking and S3 lockfile support |
+| Define AWS infrastructure | Terraform configuration describes the VPC, subnets, internet gateway, routing, EKS, node group, IAM roles and access entry |
+| Automate provisioning through Jenkins | A separate apply pipeline generated a saved plan, paused for review and applied it |
+| Test consistency | A later Jenkins plan reported **No changes** and finished successfully |
+| Test EKS access | WSL and a Jenkins job both listed two Ready worker nodes |
+
+The first apply partially succeeded and failed at node-group creation because the Jenkins role lacked `iam:GetRole` for the EKS node-group service-linked role. After the permission was added, a fresh plan showed one resource remaining and a second apply completed successfully.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    Dev["Developer: WSL"] -->|"Push Terraform code"| GitHub["GitHub repository"]
+    GitHub -->|"Checkout"| Jenkins["Jenkins on existing EC2"]
+    Jenkins -->|"State and lock"| State["S3 state bucket"]
+    Jenkins -->|"Plan and reviewed apply"| AWS["AWS infrastructure"]
+    Dev -->|"kubectl and AWS CLI"| EKS["EKS cluster"]
+    Jenkins -->|"kubectl"| EKS
+    AWS --> EKS
+```
+
+```mermaid
+flowchart TB
+    VPC["ShopNow VPC: 10.20.0.0/16"] --> Subnet1["Public subnet: AZ 1"]
+    VPC --> Subnet2["Public subnet: AZ 2"]
+    Subnet1 --> Node1["EKS worker node"]
+    Subnet2 --> Node2["EKS worker node"]
+    VPC --> IGW["Internet gateway"]
+    EKS["EKS control plane"] --> Node1
+    EKS --> Node2
+```
+
+The EKS control plane is managed by AWS. The managed node group creates and manages EC2 worker nodes. The existing Jenkins EC2 instance and the S3 state bucket were created separately from this Terraform configuration; they are not destroyed automatically when this Terraform project is destroyed.
+
+The diagram shows the infrastructure used in this sprint. It does not indicate that the ShopNow application, a public load balancer, Prometheus or Grafana has been deployed to EKS.
+
+## Infrastructure at a glance
+
+| Component | Configuration |
+| --- | --- |
+| VPC | `shopnow-dev-vpc`, CIDR `10.20.0.0/16` |
+| Subnets | Two public subnets in separate availability zones |
+| Internet access | Internet gateway and public route table |
+| EKS cluster | `shopnow-dev`; Kubernetes control plane reported version 1.37 |
+| Worker nodes | EKS managed node group `shopnow-dev-nodes`; desired 2, minimum 1, maximum 3; `t3.medium` on demand |
+| Node storage | 20 GiB configured per node |
+| API endpoint | Public and private endpoint enabled; public access restricted to configured Jenkins and WSL IPv4 addresses |
+| AWS identities | EC2 Jenkins role for Terraform; explicit EKS access entry for `lab-admin` |
+| Terraform state | S3 backend using key `shopnow/dev/terraform.tfstate` and `use_lockfile = true` |
+
+The public endpoint allowlist contains the IP addresses in use during setup. If the WSL internet connection or Jenkins public IP changes, access can fail until the allowed CIDRs are updated through Terraform. Access also depends on IAM authentication and Kubernetes authorization.
+
+## Tools and files
+
+| Item | Purpose |
+| --- | --- |
+| Terraform | Describes and manages AWS resources |
+| AWS CLI | Checks AWS identities, cluster details and S3 settings |
+| Jenkins | Runs Terraform plans and reviewed applies |
+| kubectl | Communicates with the Kubernetes API |
+| `terraform/versions.tf` | Terraform version, AWS provider and S3 backend settings |
+| `terraform/main.tf` | AWS provider, VPC, subnets, internet gateway and routing |
+| `terraform/eks.tf` | EKS cluster, managed nodes and IAM roles |
+| `terraform/access.tf` | EKS access entry and cluster access policy for `lab-admin` |
+| `terraform/outputs.tf` | Cluster and VPC outputs |
+| `terraform/.terraform.lock.hcl` | Records the selected provider version; commit this file |
+| `Jenkinsfile.terraform` | Plan-only Jenkins pipeline |
+| `Jenkinsfile.terraform-apply` | Saved-plan, review and apply pipeline |
+
+The Jenkins controller was installed in Sprint 1 and remains outside the Terraform-managed VPC. Its EC2 role supplies temporary AWS credentials. The Jenkins `kubectl` client reported v1.36.1 and successfully accessed the v1.37 cluster.
+
+## Remote state
+
+The state bucket was bootstrapped before Terraform used it as a backend. Its settings were verified:
+
+- S3 bucket versioning: **enabled**.
+- S3 public-access blocking: all four settings **enabled**.
+- Server-side encryption: **SSE-S3 / AES256**.
+- Terraform S3 backend: lockfile enabled with `use_lockfile = true`.
+- State path: `shopnow/dev/terraform.tfstate`.
+- Jenkins role: permissions for the intended state object and lock object.
+
+State can contain sensitive values. Restrict access to the bucket, do not commit state or saved plans to Git, and do not paste state contents into screenshots. Bucket versioning assists recovery; it does not replace access controls or a tested recovery procedure. Locking was configured; any separate concurrency test remains to be performed.
+
+## Terraform and Jenkins workflow
+
+1. **Write and review configuration:** Terraform files describe the desired infrastructure.
+2. **Initialize:** `terraform init` configures the backend and downloads the provider.
+3. **Validate:** `terraform fmt -check` and `terraform validate` check formatting and configuration.
+4. **Plan:** Terraform compares configuration, state and AWS resources. The complete initial plan showed `17 to add, 0 to change, 0 to destroy`.
+5. **Review:** The Jenkins apply job paused after creating a saved plan.
+6. **Apply:** The operator approved the saved plan in Jenkins. A later run completed the remaining node-group resource after the IAM fix.
+7. **Check consistency:** The plan-only job later reported that infrastructure matched the configuration.
+
+The apply job does not run automatically on every push. Its saved plan was removed in its post-build step. Jenkins workspace and console access should be limited because plans and outputs may contain sensitive information. The plan-only and apply jobs are separate; S3 state locking protects shared state during Terraform operations.
+
+## Verification commands
+
+Run these from the WSL environment with the intended AWS identity and region. They are read-only, except `update-kubeconfig`, which updates the local kubeconfig and current Kubernetes context.
+
+### Confirm identity and Terraform version
+
+```bash
+aws sts get-caller-identity --region ap-south-1
+terraform version
+```
+
+### Inspect the EKS cluster and node group
+
+```bash
+aws eks describe-cluster \
+  --name shopnow-dev \
+  --region ap-south-1 \
+  --query 'cluster.{Name:name,Status:status,Version:version}' \
+  --output table
+```
+
+```bash
+aws eks describe-nodegroup \
+  --cluster-name shopnow-dev \
+  --nodegroup-name shopnow-dev-nodes \
+  --region ap-south-1 \
+  --query 'nodegroup.{Name:nodegroupName,Status:status,Desired:scalingConfig.desiredSize,HealthIssues:health.issues}' \
+  --output json
+```
+
+### Connect and inspect Kubernetes
+
+```bash
+aws eks update-kubeconfig --region ap-south-1 --name shopnow-dev
+kubectl get nodes
+kubectl get pods -n kube-system
+```
+
+Observed results: two worker nodes were `Ready`; `aws-node`, `coredns` and `kube-proxy` pods were running. The separate Jenkins access-check pipeline also listed both nodes as `Ready` and finished successfully.
+
+### Check Terraform consistency
+
+```bash
+cd ~/shopNow/terraform
+terraform init
+terraform fmt -check
+terraform validate
+terraform plan
+```
+
+The Jenkins plan job reported **No changes. Your infrastructure matches the configuration.** A later plan can legitimately differ if code, AWS resources or provider behavior changes; inspect it before any apply.
+
+## Screenshot mapping
+
+Create a folder named `screenshots/sprint-2/` in the repository. Save each screenshot with the exact filename below. The image references beneath the table will render automatically once the screenshots are committed to GitHub. The images are placeholders; add your own captures.
+
+| No. | Screenshot to capture | What it demonstrates |
+| --- | --- | --- | --- |
+| 1 | Terraform versions on WSL and Jenkins | Terraform is available in both environments |
+<img width="785" height="100" alt="image" src="https://github.com/user-attachments/assets/5a3d8b5c-159a-4f36-b025-4708d42f28f1" />
+<img width="170" height="58" alt="image" src="https://github.com/user-attachments/assets/46678e60-2d8f-4c6c-8b00-7921336a79d5" />
+
+| 2 | S3 state bucket properties | Versioning, encryption and public-access block |
+<img width="588" height="595" alt="image" src="https://github.com/user-attachments/assets/27f9a637-53e5-4700-9725-d41d4821278c" />
+
+
+| 3 | Jenkins full Terraform plan | Initial plan and review step |
+<img width="873" height="785" alt="image" src="https://github.com/user-attachments/assets/8bfc4fbb-7723-4460-b4cb-b1110ac78d84" />
+
+| 4 | Jenkins successful apply | Apply completion and successful Jenkins build |
+<img width="1368" height="559" alt="image" src="https://github.com/user-attachments/assets/2b6c1802-2349-4bee-9eb3-2ad624249aa4" />
+
+
+| 5 | EKS cluster overview | Cluster name, region, status and Kubernetes version |
+| 6 | EKS node group | Managed node group and status |
+| 7 | WSL `kubectl get nodes` | Two Ready nodes |
+<img width="995" height="593" alt="image" src="https://github.com/user-attachments/assets/9a3d7b3d-062e-478d-b774-6d61805a2f40" />
+
+| 8 | Jenkins drift check | Plan reports no changes and build succeeds |
+<img width="837" height="810" alt="image" src="https://github.com/user-attachments/assets/4d3976c5-e53b-4b19-98f4-91cce606fea5" />
+
+| 9 | Jenkins EKS access job | Jenkins lists Ready nodes and finishes successfully |
+<img width="1070" height="446" alt="image" src="https://github.com/user-attachments/assets/ad91e231-bbf8-496c-84df-957d9de6e608" />
+
+
+## Troubleshooting
+
+| Symptom | Resolution used |
+| --- | --- |
+| `terraform: not found` on Jenkins | Installed Terraform on the EC2 instance and verified it as the Jenkins user. |
+| Git push rejected as non-fast-forward | Fetched remote changes, rebased the local Terraform commit onto the README commits and pushed again. |
+| Node-group creation failed: missing `iam:GetRole` | Granted the Jenkins role read access to the existing EKS service-linked roles; verified access and generated a fresh plan. |
+| `sudo: unknown user jenkins` | The command was run on a different machine. Reconnected to Jenkins EC2 through Session Manager and ran it there. |
+| Jenkins Docker access denied in Sprint 1 | Restarted Jenkins after adding its user to the Docker group, then checked the running process groups. |
+
+If an apply fails, inspect the error and generate a fresh plan. Terraform may have already created some resources and updated remote state. Do not delete the state bucket to fix an apply error.
+
+## Security, cost and lifecycle notes
+
+- The EKS API public endpoint is restricted to the configured IP addresses, but the nodes are in public subnets. Review network design and hardening before production use.
+- The `lab-admin` EKS access entry grants full cluster administrator access. The Jenkins cluster creator also has bootstrap administrator access. Review and narrow privileges for production.
+- The lab Jenkins provisioning policy includes broad regional EC2 and EKS permissions. Jenkins jobs, the Docker socket and IAM role are sensitive; limit access to trusted users and tighten permissions.
+- The EKS CNI policy is attached to the node role in this learning setup; a workload-specific identity should be evaluated for a production design.
+- The cluster, worker nodes, storage, public IPv4 addresses, Jenkins instance, ECR and other AWS resources can incur charges. A single `dev` environment remains running through Sprint 6.
+- After Sprint 6, review and destroy Terraform-managed resources using a reviewed plan. Retain the S3 state bucket until the destroy is complete and AWS resources are verified removed. Jenkins, the state bucket and Sprint 1 resources were created separately and need separate cleanup.
+
 
 
 
