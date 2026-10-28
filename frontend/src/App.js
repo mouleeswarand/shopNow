@@ -638,3 +638,4 @@ const ShopNowApp = () => {
 };
 
 export default ShopNowApp;
+// CI/CD deployment trigger check
