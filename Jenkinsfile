@@ -90,6 +90,7 @@ pipeline {
                       kubernetes/web.yaml | kubectl apply -f -
 
                     kubectl apply -f kubernetes/hpa.yaml
+		    kubectl apply -f kubernetes/ingress.yaml
 
                     kubectl rollout status deployment/backend -n shopnow --timeout=300s
                     kubectl rollout status deployment/frontend -n shopnow --timeout=300s
