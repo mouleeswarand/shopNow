@@ -157,17 +157,38 @@ A Jenkins Pipeline job reads the root `Jenkinsfile` from the GitHub `main` branc
 
 Create a `screenshots/` folder in the repository. Save each image using the filename listed below; the Markdown image references will then display on GitHub. If you do not have a screenshot yet, leave it out or remove its reference until it is available. Do not capture passwords, access keys, tokens, session codes or other sensitive information.
 
-| # | Screenshot | Save as | Evidence |
+| # | Screenshot | Evidence |
 | --- | --- | --- | --- |
-| 1 | WSL tools / Docker images | `screenshots/01-local-docker-images.png` | Three local `sprint1` images |
-| 2 | Backend API and healthy container | `screenshots/02-backend-health.png` | HTTP 200 and healthy Docker status |
-| 3 | Customer application | `screenshots/03-customer-app.png` | Customer page and sample products |
-| 4 | Admin application | `screenshots/04-admin-dashboard.png` | Admin dashboard |
-| 5 | EC2 instance | `screenshots/05-jenkins-ec2.png` | Jenkins host, running state and region |
-| 6 | Jenkins dashboard | `screenshots/06-jenkins-dashboard.png` | Jenkins dashboard after setup |
-| 7 | Successful Jenkins build | `screenshots/07-jenkins-build.png` | Build 6 and `SUCCESS` / pipeline stages |
-| 8 | ECR image tags | `screenshots/08-ecr-image-tags.png` | Three repositories with `build-6` |
-| 9 | Poll SCM configuration or polling log | `screenshots/09-poll-scm.png` | Polling schedule and/or successful check |
+| 1 | WSL tools / Docker images | Three local `sprint1` images |
+<img width="952" height="61" alt="image" src="https://github.com/user-attachments/assets/14d10558-eca1-4502-a8cd-176a97e63b25" />
+
+| 2 | Backend API and healthy container | HTTP 200 and healthy Docker status |
+<img width="632" height="215" alt="image" src="https://github.com/user-attachments/assets/0aa5b176-9f2e-48fa-808d-c629f6dc3f2b" />
+<img width="1665" height="368" alt="image" src="https://github.com/user-attachments/assets/ba5faf2d-6c5d-4c5b-a506-6c333855c477" />
+<img width="1225" height="79" alt="image" src="https://github.com/user-attachments/assets/88a288b7-01c5-456a-b3bb-06a7295ad1df" />
+
+| 3 | Customer application | Customer page and sample products |
+<img width="1356" height="946" alt="image" src="https://github.com/user-attachments/assets/8fcf11ca-c635-4f79-9c81-77f064a44ae9" />
+
+| 4 | Admin application | Admin dashboard |
+<img width="1380" height="728" alt="image" src="https://github.com/user-attachments/assets/9ac5215d-97d1-4fba-be77-a32541e72290" />
+
+| 5 | EC2 instance | Jenkins host, running state and region |
+<img width="1664" height="235" alt="image" src="https://github.com/user-attachments/assets/299b29c6-db06-4bf1-a54b-667f0a366c74" />
+
+
+| 6 | Jenkins dashboard | Jenkins dashboard after setup |
+<img width="1656" height="501" alt="image" src="https://github.com/user-attachments/assets/fe33f537-9430-430b-bcc0-0f58d838d8f5" />
+
+| 7 | Successful Jenkins build | Build 6 and `SUCCESS` / pipeline stages |
+<img width="1659" height="305" alt="image" src="https://github.com/user-attachments/assets/d422037e-a1a3-41e3-a3bf-9bc5e3c08000" />
+
+| 8 | ECR image tags | Three repositories with `build-6` |
+<img width="1312" height="281" alt="image" src="https://github.com/user-attachments/assets/3efc7975-cdd3-45f1-a357-44f81a8c3916" />
+
+| 9 | Poll SCM configuration or polling log | Polling schedule and/or successful check |
+<img width="413" height="807" alt="image" src="https://github.com/user-attachments/assets/1d52761d-576a-44df-aba3-b796c888ff53" />
+
 
 ## Troubleshooting notes
 
