@@ -103,16 +103,7 @@ pipeline {
             steps {
                 sh '''
                     kubectl get pods,svc,hpa -n shopnow
-
-                    kubectl exec -n shopnow deployment/frontend -- \
-                      wget -qO- http://127.0.0.1/mouli/api/products |
-                      grep -q '"products"'
-
-                    kubectl exec -n shopnow deployment/admin -- \
-                      wget -qO- http://127.0.0.1/mouli-admin/api/health |
-                      grep -q '"status":"OK"'
-
-                    echo "Frontend and admin API checks passed."
+   		    bash scripts/smoke-test.sh	
                 '''
             }
        	  }
