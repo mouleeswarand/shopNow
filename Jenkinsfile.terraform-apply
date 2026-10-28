@@ -1,0 +1,71 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+    }
+
+    stages {
+        stage('Verify identity') {
+            steps {
+                sh '''
+                    terraform version
+                    aws sts get-caller-identity --region "$AWS_REGION"
+                '''
+            }
+        }
+
+        stage('Initialize and validate') {
+            steps {
+                dir('terraform') {
+                    sh '''
+                        terraform init -input=false
+                        terraform fmt -check
+                        terraform validate
+                    '''
+                }
+            }
+        }
+
+        stage('Create plan') {
+            steps {
+                dir('terraform') {
+                    sh '''
+                        terraform plan \
+                          -input=false \
+                          -lock-timeout=5m \
+                          -out=tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Review plan') {
+            steps {
+                input message: 'Review the plan in Console Output. Create the planned AWS resources?',
+                      ok: 'Apply reviewed plan'
+            }
+        }
+
+        stage('Apply plan') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform apply -input=false -lock-timeout=5m tfplan'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            dir('terraform') {
+                sh 'rm -f tfplan'
+            }
+        }
+    }
+}
