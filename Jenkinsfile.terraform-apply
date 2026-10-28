@@ -59,6 +59,13 @@ pipeline {
                 }
             }
         }
+        stage('Configure target with Ansible') {
+            steps {
+                build job: 'shopnow-ansible',
+                      wait: true,
+                      propagate: true
+            }
+        } 
     }
 
     post {
