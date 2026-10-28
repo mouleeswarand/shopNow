@@ -1047,6 +1047,11 @@ Create `docs/screenshots/sprint-5/` in the repository and save screenshots using
 - **Pending PVC:** Inspect `kubectl describe pvc -n monitoring` and verify that the EBS CSI driver and storage class are functioning.
 - **Port already in use:** Select a different local port, for example `3001:3000` for Grafana.
 
+## Final Output
+
+<img width="1663" height="986" alt="image" src="https://github.com/user-attachments/assets/7be5f180-31d8-49f6-a544-17cf109bcd3c" />
+
+
 
 
 
