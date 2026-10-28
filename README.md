@@ -610,10 +610,238 @@ Create `screenshots/sprint-3/` in the repository and save screenshots using the 
 | Ansible run leaves temporary S3 files | Inspect the transfer bucket after interrupted jobs and remove leftovers according to the lab's retention needs. |
 
 
+# Sprint 4 — CI/CD Deployment of ShopNow to Amazon EKS
+
+## Overview
+
+This sprint deploys the [ShopNow application](https://github.com/mouleeswarand/shopNow) to Amazon EKS using Kubernetes manifests and a Jenkins pipeline. A Git change triggers Jenkins through Poll SCM; Jenkins builds three Docker images, pushes them to Amazon ECR, deploys the workloads and runs basic post-deployment checks.
+
+The customer application is accessible through an AWS Application Load Balancer (ALB) restricted to the lab user's public IP. The admin dashboard remains an internal Kubernetes Service and was tested using port forwarding.
+
+> **Learning environment:** The ALB uses HTTP, the ingress is IP-restricted, MongoDB is a single instance, and the backend uses the lab database administrator credentials. Use sample data only. TLS, application authentication, database least privilege, backups and production hardening remain future work.
+
+## Sprint 4 goals and verified results
+
+| Goal | Result |
+| --- | --- |
+| Build and push application images | Jenkins built and pushed frontend, admin and backend images to ECR |
+| Deploy to EKS | MongoDB and all three application components ran as Kubernetes workloads |
+| Persistent storage | A 5 GiB EBS-backed MongoDB claim was Bound; the EBS CSI test volume was independently created, mounted and deleted |
+| Health checks | Workload probes and Jenkins rollout checks were configured; application pods became Ready |
+| Autoscaling | Metrics Server supplied CPU metrics; a controlled load test increased frontend replicas from one to two |
+| End-to-end trigger | A Git push started Jenkins with `Started by an SCM change`; build 10 deployed matching image tags and finished successfully |
+| Load balancing | AWS Load Balancer Controller reconciled an ALB Ingress; the customer page displayed products through the ALB |
+
+Only the frontend HPA was demonstrated scaling under load. Backend HPA metrics were valid, but a backend scale-up test was not reported. The current tests are basic checks, not a comprehensive automated test suite.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    GitHub["GitHub main"] -->|"Poll SCM"| Jenkins["Jenkins pipeline"]
+    Jenkins -->|"Build and push"| ECR["Amazon ECR"]
+    Jenkins -->|"Apply and verify"| EKS["Amazon EKS"]
+    ECR -->|"Pull images"| EKS
+```
+
+```mermaid
+flowchart TB
+    User["Allowed client"] -->|"HTTP"| ALB["Application Load Balancer"]
+    ALB --> Frontend["Frontend Service and pods"]
+    Frontend --> Backend["Backend Service and pods"]
+    Admin["Admin Service and pod"] --> Backend
+    Backend --> Mongo["MongoDB pod"]
+    Mongo --> EBS["EBS persistent volume"]
+```
+
+The ALB routes `/mouli` to the frontend. Frontend Nginx proxies `/mouli/api/` to `backend-service`; admin Nginx proxies `/mouli-admin/api/` to the same backend. The admin dashboard is currently reached using `kubectl port-forward`, not through the ALB. Metrics Server provides CPU data for the frontend and backend HPAs.
+
+## Environment and components
+
+| Component | Implementation |
+| --- | --- |
+| Region and cluster | `ap-south-1`, EKS cluster `shopnow-dev` |
+| Namespace | `shopnow` |
+| Images | Private ECR repositories for `frontend`, `admin`, and `backend` |
+| Database | MongoDB 7.0, one pod and an internal ClusterIP Service |
+| Storage | EBS CSI driver, encrypted `shopnow-gp3` StorageClass, 5 GiB claim |
+| Metrics | EKS Metrics Server add-on |
+| Scaling | CPU HPAs for frontend and backend, each configured for 1–2 replicas and 70% target utilization |
+| Traffic | AWS Load Balancer Controller, ALB Ingress for customer frontend; admin remains internal |
+| CI/CD | Jenkins Pipeline, Git polling, Docker, AWS CLI and kubectl |
+
+The MongoDB PVC uses a StorageClass with `reclaimPolicy: Delete`. **Deleting the claim can delete the EBS volume and its data.** Plan backups and cleanup accordingly.
+
+## Repository files
+
+| File | Purpose |
+| --- | --- |
+| `Jenkinsfile` | Builds, checks, pushes and deploys application images |
+| `kubernetes/namespace.yaml` | Creates the `shopnow` namespace |
+| `kubernetes/storageclass.yaml` | Defines the encrypted `shopnow-gp3` StorageClass |
+| `kubernetes/mongodb.yaml` | Defines the PVC, MongoDB Deployment and internal Service |
+| `kubernetes/backend.yaml` | Defines the backend Deployment and internal Service |
+| `kubernetes/web.yaml` | Defines frontend and admin Deployments and Services |
+| `kubernetes/hpa.yaml` | Defines frontend and backend CPU autoscalers |
+| `kubernetes/ingress.yaml` | Routes restricted ALB traffic to the frontend |
+| `terraform/addons.tf` | Manages Metrics Server, EBS CSI and its AWS identity resources |
+| `terraform/load-balancer-controller.tf` | Manages the load-balancer controller IAM role and policy attachment |
+| `terraform/aws-load-balancer-controller-policy.json` | Versioned controller IAM policy document |
+
+The Gateway API CRDs and the AWS Load Balancer Controller were installed with `kubectl` and Helm during this sprint; their lifecycle is not managed by the Terraform files listed above. Record and manage those components separately when rebuilding or cleaning up.
+
+## Implementation journey
+
+### 1. Metrics and EBS storage prerequisites
+
+- Metrics Server EKS add-on `v0.9.0-eksbuild.14` became `ACTIVE`, with two available replicas. `kubectl top nodes` returned CPU and memory usage.
+- The EBS CSI add-on `v1.67.2-eksbuild.1` was provisioned with a dedicated IAM role and the EKS cluster's OIDC provider.
+- A temporary namespace, PVC and pod verified EBS volume provisioning and file access. The test namespace was removed, the persistent volume disappeared and AWS reported the test EBS volume was no longer found.
+- The `shopnow-gp3` StorageClass was retained and committed for application use.
+
+### 2. Database and backend
+
+The `shopnow` namespace and StorageClass were applied. A Kubernetes Secret named `mongodb-credentials` was created manually; it is not in Git. The MongoDB Deployment uses a persistent volume claim and exposes port 27017 through an internal Service. A separate backend Deployment obtains `MONGODB_URI` from the Secret and exposes port 5000 internally.
+
+Verification showed the MongoDB PVC Bound, the backend and database pods Ready, and backend logs reporting a successful database connection and sample-data seeding. Port-forwarded requests to `/api/health` and `/api/products` returned HTTP 200.
+
+**Secret lifecycle:** the pipeline checks for the existing Secret but does not provision or rotate it. A new cluster or namespace needs credentials provisioned securely before deployment. Changing the Secret alone does not rotate MongoDB credentials already initialized on the persistent volume. For production, use a separate least-privileged application database account and a managed secret workflow.
+
+### 3. Frontend, admin and health checks
+
+Frontend and admin Deployments were created with internal ClusterIP Services and HTTP readiness/liveness probes. The backend uses `/api/health`; MongoDB uses TCP probes. The frontend and admin Nginx health endpoint is `/health`.
+
+Through port forwarding, the customer page displayed six products and the admin dashboard opened. Requests through the frontend product route and the admin API health route returned HTTP 200. These checks did not demonstrate an order checkout, order administration or full user acceptance test.
+
+### 4. Horizontal Pod Autoscaling
+
+Metrics Server supplied CPU metrics. Frontend and backend HPAs reported `ScalingActive=True` and `ValidMetricFound`. A temporary bounded request generator drove the frontend HPA from one replica to two. The test Job was removed afterward. The backend HPA was configured and receiving metrics but was not separately demonstrated scaling under load.
+
+The Jenkins deployment does not continuously set frontend or backend replica counts in their manifests, leaving those counts to their HPAs. Pod autoscaling is distinct from scaling the EKS node group; an HPA cannot create capacity if no node has room for its pods.
+
+### 5. Jenkins CI/CD pipeline
+
+The application pipeline:
+
+1. Checks Git, Docker, AWS CLI, kubectl and the Jenkins AWS identity.
+2. Builds frontend, admin and backend images tagged with the Jenkins build number.
+3. Runs `node --check` for backend JavaScript syntax.
+4. Authenticates to ECR and pushes the images.
+5. Applies namespace, storage, database, application, HPA and Ingress manifests; renders the application image tags for that build.
+6. Waits for database and application rollouts.
+7. Tests the frontend product API route and admin health API route from within their pods.
+
+A manual build 9 successfully deployed matching tags, and a later Git change was verified as **Started by an SCM change**. Build 10 deployed `build-10` for all three application images and finished successfully. After the Ingress was added to the pipeline, another Jenkins build succeeded and the customer page was confirmed working.
+
+**Pipeline limitations:** the current image substitution depends on `build-6` strings in the manifests, build-number tags are mutable unless ECR immutability is enforced, and the smoke checks do not replace unit, integration, security or full end-to-end tests. A failed rollout can leave components at different image versions; review pipeline output and Kubernetes state before retrying or rolling back.
+
+### 6. Application Load Balancer
+
+The AWS Load Balancer Controller was installed with Helm chart `1.14.1` (controller `v2.14.1`) using its own IAM role. Gateway API standard CRDs were installed separately. A customer Ingress uses `ingressClassName: alb`, IP targets, health-check path `/health` and an inbound CIDR restricted to the lab user's public IPv4 address.
+
+The ALB reconciled successfully and the customer page displayed products. The first WSL DNS lookup failed while the ALB was active; the page later opened in the browser. The reason for that earlier DNS failure was not established.
+
+The ALB currently listens on HTTP port 80. The IP allowlist may need updating if the client IP changes. The admin dashboard remains internal; do not expose it publicly without authentication, TLS and suitable security controls.
+
+## Verification commands
+
+Use the correct cluster and AWS identity. These commands inspect the deployed state; port forwarding runs until stopped with Ctrl+C.
+
+```bash
+kubectl get pods,svc,pvc,hpa -n shopnow
+kubectl get ingress shopnow-frontend -n shopnow
+kubectl top nodes
+```
+
+```bash
+kubectl get deployment backend frontend admin -n shopnow \
+  -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas
+```
+
+```bash
+kubectl rollout status deployment/backend -n shopnow --timeout=300s
+kubectl rollout status deployment/frontend -n shopnow --timeout=300s
+kubectl rollout status deployment/admin -n shopnow --timeout=300s
+```
+
+```bash
+kubectl describe hpa frontend-hpa -n shopnow
+kubectl describe hpa backend-hpa -n shopnow
+```
+
+To view the internal admin dashboard from your computer:
+
+```bash
+kubectl port-forward -n shopnow service/admin-service 8084:80
+```
+
+Open `http://localhost:8084/mouli-admin/`. Stop the port-forward with Ctrl+C after testing. Do not print Kubernetes Secret contents or credentials in logs or screenshots.
+
+## Screenshot mapping
+
+Create `screenshots/sprint-4/` in your repository. Save screenshots with the exact filenames below; the Markdown references will display on GitHub once the images are committed. The references are placeholders for your own screenshots.
+
+| No. | Screenshot to capture |  Evidence |
+| --- | --- | --- | --- |
+| 1 | Metrics Server and `kubectl top nodes` |  Metrics available |
+<img width="834" height="231" alt="image" src="https://github.com/user-attachments/assets/c958a449-ae0f-419b-a5d3-01284506de98" />
+
+
+| 2 | EBS CSI test PVC and pod |  Temporary volume Bound and mounted |
+<img width="1251" height="487" alt="image" src="https://github.com/user-attachments/assets/fe32f1c5-e20f-4168-b330-0d61e860d69b" />
+<img width="1005" height="719" alt="image" src="https://github.com/user-attachments/assets/0a14dbce-2c31-43c8-93a1-0b66721c0895" />
+
+
+| 3 | MongoDB PVC and pod |  Persistent claim Bound and pod running |
+| 4 | ShopNow pods and Services |  Four workloads running |
+<img width="1335" height="243" alt="image" src="https://github.com/user-attachments/assets/88f319c7-46a7-4668-ba46-6e3b059eb3f6" />
 
 
 
+| 5 | Customer page through port forwarding |  Frontend renders sample products |
+<img width="1420" height="640" alt="image" src="https://github.com/user-attachments/assets/98406c09-6248-47b2-9c0f-4cefee283d6a" />
 
+
+| 6 | Admin dashboard through port forwarding | Admin page renders |
+<img width="1355" height="633" alt="image" src="https://github.com/user-attachments/assets/15495954-6b35-49a0-a6d1-1611e8079dfc" />
+
+
+| 7 | Jenkins SCM trigger and successful build |  Automatic pipeline and successful checks |
+<img width="624" height="361" alt="image" src="https://github.com/user-attachments/assets/7b18538a-998d-4435-9dac-f8cfc85f7ba6" />
+
+
+| 8 | Deployed image tags |  Frontend, admin and backend use the same build tag |
+<img width="766" height="102" alt="image" src="https://github.com/user-attachments/assets/bc5c0fe6-70f3-4ba8-a34e-2a535e9bfa3b" />
+
+
+| 9 | HPA during scale-up |  Frontend replicas reached two |
+<img width="827" height="424" alt="image" src="https://github.com/user-attachments/assets/0678ddb9-9a4d-4f3b-b73f-9507e1e4a501" />
+
+
+| 10 | Load Balancer Controller status |  Controller Deployment available |
+<img width="1206" height="441" alt="image" src="https://github.com/user-attachments/assets/433205cf-7ea3-45a9-b23a-f710d265e211" />
+
+
+| 11 | ALB Ingress and reconciliation |  ALB address and Ingress events |
+<img width="754" height="338" alt="image" src="https://github.com/user-attachments/assets/5df9b304-a685-4dad-b3fd-847f1e20eed6" />
+
+<img width="1166" height="149" alt="image" src="https://github.com/user-attachments/assets/8e1a7258-1111-47a7-8fac-0c325919b00b" />
+
+
+| 12 | Customer page through ALB |  Customer page accessible through the load balancer |
+<img width="1293" height="538" alt="image" src="https://github.com/user-attachments/assets/83d07f54-7291-446f-945b-22c9ff315c9b" />
+
+
+
+## Troubleshooting
+
+| Issue | Finding or resolution |
+| --- | --- |
+| Jenkins reported `kind not set` for `web.yaml` | The first `apiVersion` line was indented. Corrected it and used server-side dry-run validation before redeploying. The failed run had already updated the backend, so the workloads temporarily used different tags. |
+| MongoDB PVC pending | Check EBS CSI add-on health, IAM permissions, StorageClass, scheduling and `kubectl describe pvc`. `WaitForFirstConsumer` can be normal before the pod is scheduled. |
+| HPA shows `<unknown>` | Check Metrics Server, pod readiness, CPU requests and HPA events. Older warning events do not necessarily indicate a current failure. |
+| ALB address does not resolve | Verify the exact Ingress hostname and ALB state; compare local and public DNS resolution. The earlier lab DNS issue resolved, but its cause was not confirmed. |
+| Jenkins fails after a partial deployment | Review rollout status, current image tags and events. A failed pipeline does not automatically roll back already applied resources.
 
 
 
