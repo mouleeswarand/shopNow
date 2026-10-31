@@ -1052,6 +1052,217 @@ Create `docs/screenshots/sprint-5/` in the repository and save screenshots using
 <img width="1663" height="986" alt="image" src="https://github.com/user-attachments/assets/7be5f180-31d8-49f6-a544-17cf109bcd3c" />
 
 
+# ShopNow: End-to-End CI/CD Architecture
+
+This guide explains how a code change moves from a developer's computer to the ShopNow application running on Amazon EKS. It also describes the VPC layout, application components, monitoring, and alerts.
+
+**Project:** [mouleeswarand/shopNow](https://github.com/mouleeswarand/shopNow)  
+**AWS region:** `ap-south-1` (Mumbai)  
+**EKS cluster:** `shopnow-dev`  
+**Application namespace:** `shopnow`  
+**Monitoring namespace:** `monitoring`
+
+> This describes the documented lab and previously observed results. It is not a live inventory. The separate Ansible target EC2 instance is intentionally outside the scope of this architecture guide.
+
+## 1. Architecture overview
+
+```mermaid
+flowchart TB
+    Dev["Developer<br/>WSL and Git"] -->|"Push code"| Git["GitHub<br/>ShopNow repository"]
+    Git -->|"SCM polling detects change"| Jenkins["Jenkins EC2<br/>Jenkins VPC"]
+    Jenkins -->|"Build and push images"| ECR["Amazon ECR<br/>Container images"]
+    Jenkins -->|"Deploy and check"| EKS["Amazon EKS<br/>EKS VPC"]
+    ECR -->|"Worker nodes pull images"| EKS
+    EKS --> App["ShopNow application"]
+    EKS --> Monitor["Prometheus, Grafana<br/>and Alertmanager"]
+    Monitor -->|"Email alert"| Email["Operations email"]
+    Jenkins -->|"Pipeline failure email"| Email
+```
+
+Jenkins builds and delivers the application. ECR stores the Docker images. EKS worker nodes run the application and monitoring containers. Prometheus collects metrics, Grafana displays them, and Alertmanager sends monitoring alerts. Jenkins sends a separate notification when the application pipeline fails.
+
+## 2. VPC and compute layout
+
+A **virtual private cloud (VPC)** is a private network in AWS. Your documented lab places Jenkins and the EKS workers in separate VPCs connected by VPC peering.
+
+```mermaid
+flowchart LR
+    subgraph JVPC["Jenkins VPC"]
+        J["Jenkins EC2"]
+    end
+    subgraph EVPC["EKS VPC"]
+        N1["Worker node 1"]
+        N2["Worker node 2"]
+    end
+    J <-->|"VPC peering and private routes"| N1
+    J <-->|"VPC peering and private routes"| N2
+```
+
+| Component | Location | Purpose |
+| --- | --- | --- |
+| Jenkins EC2 | Jenkins VPC | Runs Jenkins and CI/CD jobs. |
+| Two EKS worker nodes | EKS VPC | Run application, monitoring, and Kubernetes system pods. |
+| EKS control plane | AWS managed | Manages the Kubernetes cluster; it is not an EC2 worker node managed by you. |
+| Amazon ECR | AWS managed service | Stores container images; it is not installed on a worker node. |
+| Separate Ansible target EC2 | Outside the scope of this guide | A configuration-management demonstration target. |
+
+Two worker nodes provide additional capacity and allow Kubernetes to attempt to reschedule workloads if a node fails. They do **not** by themselves guarantee uninterrupted service. Your application components and MongoDB were observed with one replica each, and MongoDB's EBS volume and availability-zone placement can affect recovery.
+
+### VPC peering and connectivity
+
+VPC peering provides a private path between the VPCs when route tables and security rules allow traffic. In this lab, the documented use is for Prometheus in EKS to reach Jenkins metrics through a private metrics proxy.
+
+Jenkins also needs network connectivity to the Kubernetes API, plus the appropriate IAM permissions and EKS authorization, to deploy. The project documentation does not establish that this API connection uses VPC peering in every case.
+
+**Confirm from the current Terraform and AWS configuration:** subnet placement, route tables, security groups, EKS API endpoint access, and the exact host and path of the Jenkins metrics proxy. Avoid assuming a private route exists merely because peering is configured.
+
+## 3. Developer-to-deployment workflow
+
+The Jenkins application job uses **SCM polling**: Jenkins periodically checks GitHub for changes. A GitHub webhook is not documented for this job.
+
+```mermaid
+sequenceDiagram
+    participant D as Developer
+    participant G as GitHub
+    participant J as Jenkins
+    participant R as Amazon ECR
+    participant K as Amazon EKS
+    D->>G: Push code to main
+    J->>G: Poll repository and detect change
+    J->>G: Check out source and Jenkinsfile
+    J->>J: Build frontend, admin and backend images
+    J->>R: Push build-tagged images
+    J->>K: Apply Kubernetes manifests
+    K->>R: Worker nodes pull images
+    J->>K: Wait for rollout and run smoke test
+```
+
+1. **Push:** A developer commits and pushes code to the configured GitHub branch.
+2. **Detect and check out:** Jenkins polls GitHub, detects a change, and checks out the repository and `Jenkinsfile`.
+3. **Build:** Jenkins builds three Docker images: frontend, admin, and backend. The build number is used in each image tag.
+4. **Publish:** Jenkins authenticates to ECR and pushes the images. These images are deployable build artifacts.
+5. **Deploy:** Jenkins applies the namespace, storage, application, autoscaler, and ingress configuration. Kubernetes schedules the pods and the worker nodes pull the images.
+6. **Verify:** Jenkins waits for deployment rollouts and runs `scripts/smoke-test.sh`.
+7. **Notify:** If the pipeline fails, the Jenkins Email Extension action sends a failure notification to the configured recipient.
+
+At one observed point, all three application deployments used the tag `build-21`. An earlier build was observed starting from an SCM change; the start cause of build 21 was not independently established.
+
+### Smoke-test scope
+
+The smoke test checks the deployment rollouts, that the MongoDB PVC is `Bound`, the products API through the frontend, and the backend health API through the admin application. A Jenkins run produced:
+
+```text
+All ShopNow smoke tests passed.
+Finished: SUCCESS
+```
+
+This is a quick health check. It does not prove all customer transactions, failover, backup restoration, or performance under load.
+
+## 4. Application architecture
+
+```mermaid
+flowchart TB
+    User["Customer browser"] --> ALB["AWS Application<br/>Load Balancer"]
+    ALB --> Front["Frontend pod<br/>Nginx and React"]
+    Front --> Back["Backend pod<br/>Node.js and Express"]
+    Admin["Admin pod<br/>Internal access"] --> Back
+    Back --> Mongo["MongoDB pod"]
+    Mongo --> EBS["EBS persistent volume"]
+```
+
+The frontend, admin, backend, and MongoDB run as Kubernetes pods on the EKS worker nodes. Kubernetes decides placement, and a pod may move to another node after a restart or scheduling event.
+
+| Component | Purpose | Access |
+| --- | --- | --- |
+| Frontend | Customer-facing ShopNow application | Customer ingress through the ALB. |
+| Admin | Administration interface | Internal Kubernetes Service; the lab used port forwarding. |
+| Backend | Application API and metrics endpoint | Internal Kubernetes Service. |
+| MongoDB | Application database | Internal Service with an EBS-backed PVC. |
+
+The documented ingress uses **HTTP** and was restricted to the configured public client IP. HTTPS, a domain, and suitable authentication are production improvements. A `Bound` PVC confirms the claim was attached to storage; it does not establish that backups or restore procedures work.
+
+## 5. Observability architecture
+
+Observability helps an operator understand system health, detect issues, and investigate failures. In this lab, the main monitoring components run **inside EKS**, in the `monitoring` namespace, on the same worker-node pool used by ShopNow.
+
+```mermaid
+flowchart TB
+    subgraph Cluster["EKS cluster"]
+        Backend["ShopNow backend<br/>Application metrics"]
+        Kube["Nodes and Kubernetes<br/>Infrastructure metrics"]
+        Prom["Prometheus<br/>Collects metrics"]
+        Graf["Grafana<br/>Displays dashboards"]
+        Alert["Alertmanager<br/>Routes alerts"]
+        Backend --> Prom
+        Kube --> Prom
+        Prom --> Graf
+        Prom --> Alert
+    end
+    Jenkins["Jenkins metrics<br/>Jenkins VPC"] -->|"Private proxy and VPC peering"| Prom
+    Alert --> Mail["Email"]
+```
+
+| Component | Where it runs | Purpose |
+| --- | --- | --- |
+| Prometheus | EKS, `monitoring` namespace | Collects metrics and evaluates alert rules. |
+| Grafana | EKS, `monitoring` namespace | Displays metrics in dashboards. |
+| Alertmanager | EKS, `monitoring` namespace | Routes Prometheus alerts to email. |
+| Node exporter | On EKS worker nodes | Exposes node measurements, including CPU and memory. |
+| kube-state-metrics | EKS, `monitoring` namespace | Reports the state of Kubernetes resources. |
+| Backend `/metrics` | ShopNow backend pod | Exposes application and process metrics. |
+| Jenkins Prometheus plugin | Jenkins EC2 | Exposes Jenkins job and executor metrics. |
+
+Prometheus and Grafana use separate EBS-backed persistent volume claims. Both were observed as `Bound` during the lab checks. The backend and Jenkins Prometheus targets each returned `up = 1`, indicating a successful most recent scrape at that time.
+
+### Alerts and email
+
+The configured rules include `ShopNowBackendMetricsUnavailable`, `JenkinsMetricsUnavailable`, and `ShopNowBackendUnavailable`.
+
+- A temporary Prometheus test alert fired and its email was received. The temporary rule was then removed.
+- A separate Jenkins email test job failed intentionally and its notification was received.
+- The real application pipeline has a failure-email action, but its failure path was not deliberately triggered.
+
+These tests demonstrate the tested notification paths; they do not prove every real failure condition or alert rule.
+
+### Helm
+
+The monitoring stack was installed using the **`kube-prometheus-stack` Helm chart** in the `monitoring` namespace. `monitoring/values.yaml` contains lab-specific configuration.
+
+The ShopNow application itself is deployed through Kubernetes YAML manifests with `kubectl apply`, rather than through a ShopNow Helm chart.
+
+## 6. Infrastructure as code
+
+Terraform defines much of the AWS infrastructure, including the EKS environment and documented networking. Terraform state is stored remotely in S3. The infrastructure workflow is separate from a normal application build and deployment:
+
+1. Run the Terraform plan job and review the proposed changes.
+2. When a change is intended, review and approve the saved plan in the apply job.
+3. Apply the approved plan and confirm the outcome.
+4. Run a subsequent plan when appropriate to check for differences between configuration and the resources Terraform manages.
+
+The latest shared plan reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+This was a point-in-time result for Terraform-managed resources, not a guarantee that every AWS resource is represented in Terraform.
+
+## 7. Results and production considerations
+
+| Area | Observed result | Remaining consideration |
+| --- | --- | --- |
+| CI/CD | Jenkins successfully deployed and ran the smoke test. | Add broader automated functional and security testing; test rollback. |
+| Infrastructure | Terraform plan succeeded with no changes. | Recheck after infrastructure changes and review actual networking. |
+| Cluster | Two nodes were observed `Ready`; application deployments were available. | Test node failure, capacity, and multi-replica behavior. |
+| Storage | MongoDB, Prometheus, and Grafana PVCs were `Bound`. | Implement and test backups and restore procedures. |
+| Monitoring | Backend and Jenkins targets reported `up = 1`. | Review alert thresholds and monitoring recovery. |
+| Notifications | Temporary Prometheus alert and separate Jenkins test emails arrived. | Validate real alert conditions and operational escalation. |
+
+Monitoring shares the same worker-node pool as ShopNow, so a major cluster or capacity problem could affect both the application and its monitoring. For production, review TLS, authentication, IAM and Kubernetes permissions, network security, database resilience, backups, deployment rollback, load testing, and recovery objectives.
+
+## 8. Presentation explanation
+
+> A developer pushes code to GitHub. Jenkins detects the change, builds three Docker images, and stores them in Amazon ECR. Jenkins then deploys the application to Amazon EKS and runs a smoke test. Prometheus and Grafana run inside EKS to monitor the application and infrastructure. Jenkins runs in a separate VPC, connected to the EKS VPC through VPC peering for private metrics collection. Alertmanager and Jenkins send email notifications for their respective alerts and pipeline failures.
 
 
 
